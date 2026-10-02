@@ -1,0 +1,29 @@
+node_modules/
+dist/
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Local history and editor files
+.Rhistory
+.RData
+.Ruserdata
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local environment and secrets
+.env
+.env.local
+.env.*.local
+
+# Supabase local state
+supabase/.env
+supabase/.env.local
+supabase/.branches/
+supabase/.temp/
+
+# Test and build output
+coverage/
+*.tsbuildinfo
