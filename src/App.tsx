@@ -187,10 +187,13 @@ function App() {
       },
     })
     if (error || !data?.ok || !Array.isArray(data.tasks) || data.tasks.length !== 10) {
-      let detail = data?.error || error?.message || '服务没有返回完整的 10 周计划'
+      let detail = [data?.error, data?.detail].filter(Boolean).join('：') || error?.message || '服务没有返回完整的 10 周计划'
       const context = (error as { context?: Response } | null)?.context
       if (context) {
-        try { const body = await context.clone().json(); if (body?.error) detail = body.error } catch { /* use the invocation error */ }
+        try {
+          const body = await context.clone().json()
+          if (body?.error || body?.detail) detail = [body.error, body.detail].filter(Boolean).join('：')
+        } catch { /* use the invocation error */ }
       }
       setPlanError(`计划生成失败：${detail}`)
       setDbMessage('计划没有生成；原有计划不会被更改。')

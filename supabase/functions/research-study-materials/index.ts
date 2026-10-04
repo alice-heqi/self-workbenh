@@ -86,7 +86,7 @@ Deno.serve(async (request) => {
       '你是一位务实的个性化学习计划设计师。请仅依据用户提供的目标、时间和资料，生成一个循序渐进的 10 周学习计划。',
       '必须返回纯 JSON，不要 Markdown 代码围栏或额外说明，格式为：{"tasks":[{"weekNumber":1,"title":"...","purpose":"...","resourceTitle":"...","estimatedMinutes":120,"completionCriteria":"..."}]}。',
       '要求：恰好 10 周；每周内容具体且不同，先基础后练习再综合；每周分钟数为正整数且不超过用户每周预算；引用资料时 resourceTitle 必须选自给定资料标题，无法匹配时写空字符串；不得虚构资料标题、链接、事实或学习内容。',
-      '每周目标、练习或产出、完成标准都要明确，避免把同一主题/资料机械重复到多周。',
+      '每周目标和内容都要不同，按基础→练习→综合递进。purpose 与 completionCriteria 各用一句简短中文（建议各不超过 45 字），不要输出长篇解释，以确保 JSON 完整。',
       `学习目标：${body.goal!.trim()}`,
       `已有基础：${body.currentLevel ?? '未填写'}`,
       `每周可投入分钟：${body.weeklyMinutes ?? 270}`,
@@ -118,7 +118,7 @@ Deno.serve(async (request) => {
         messages: [{ role: 'user', content: researchPrompt }],
         stream: false,
         temperature: 0.7,
-        max_tokens: generatePlan ? 2400 : 512,
+        max_tokens: generatePlan ? 4096 : 512,
       }),
     })
   } catch (error) {
@@ -173,9 +173,22 @@ Deno.serve(async (request) => {
     }, diagnosticMode ? 200 : 502)
   }
   if (generatePlan) {
+    const finishReason = response.choices?.[0]?.finish_reason
+    if (finishReason === 'length') {
+      return json({
+        ok: false,
+        action: 'generate_plan',
+        failureStage: 'plan_output_truncated',
+        error: 'AI 计划回复被截断了，请重新生成',
+        detail: '模型触及输出长度上限；已增加计划输出预算，请重试。',
+      }, 502)
+    }
     try {
       const normalized = result.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim()
-      const parsed = JSON.parse(normalized)
+      const firstBrace = normalized.indexOf('{')
+      const lastBrace = normalized.lastIndexOf('}')
+      if (firstBrace < 0 || lastBrace <= firstBrace) throw new Error('回复中没有完整的 JSON 对象')
+      const parsed = JSON.parse(normalized.slice(firstBrace, lastBrace + 1))
       const tasks = parsed.tasks
       if (!Array.isArray(tasks) || tasks.length !== 10) throw new Error('计划必须包含 10 周')
       const cleanTasks = tasks.map((task: any, index: number) => {
@@ -187,15 +200,19 @@ Deno.serve(async (request) => {
             estimatedMinutes > (body.weeklyMinutes ?? 270) || typeof task.completionCriteria !== 'string' || !task.completionCriteria.trim()) {
           throw new Error(`第 ${index + 1} 周内容不完整或超出时间预算`)
         }
-        const resourceTitle = typeof task.resourceTitle === 'string' ? task.resourceTitle.trim() : ''
-        if (resourceTitle && !(body.resources ?? []).some(resource => resource.title === resourceTitle)) {
+        const requestedTitle = typeof task.resourceTitle === 'string' ? task.resourceTitle.trim() : ''
+        const matchedResource = (body.resources ?? []).find(resource =>
+          resource.title.trim().toLocaleLowerCase() === requestedTitle.toLocaleLowerCase(),
+        )
+        if (requestedTitle && !matchedResource) {
           throw new Error(`第 ${index + 1} 周引用了未提供的资料`)
         }
+        const resourceTitle = matchedResource?.title ?? ''
         return { weekNumber, title: task.title.trim(), purpose: task.purpose.trim(), resourceTitle, estimatedMinutes, completionCriteria: task.completionCriteria.trim() }
       })
       return json({ ok: true, status: 'completed', action: 'generate_plan', upstreamStatus: apiResponse.status, tasks: cleanTasks })
     } catch (error) {
-      console.error('Tu-zi returned invalid study plan JSON', error, result)
+      console.error('Tu-zi returned invalid study plan JSON', error, { finishReason, resultLength: result.length })
       return json({ ok: false, action: 'generate_plan', error: 'AI 返回的计划格式不完整，请重新生成', detail: error instanceof Error ? error.message : String(error) }, 502)
     }
   }
