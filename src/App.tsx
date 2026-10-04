@@ -6,7 +6,8 @@ type FlowStep = 1 | 2 | 3 | 4
 type Tab = 'setup' | 'research' | 'plan' | 'today'
 type ResourceStatus = '待审核' | '已确认' | '暂缓' | '已放弃'
 type Resource = { title: string; source: string; topic: string; summary: string; reason: string; minutes: number; status: ResourceStatus }
-type PlanTask = { id?: string; title: string; week_number: number; estimated_minutes: number | null }
+type PlanTask = { id?: string; title: string; week_number: number; estimated_minutes: number | null; purpose?: string | null; completion_criteria?: string | null }
+type PlanDraftTask = { weekNumber: number; title: string; purpose: string; resourceTitle: string; estimatedMinutes: number; completionCriteria: string }
 
 const baseStages = [
   ['第 1 周', '建立起点', '明确目标、能力盘点与安全待确认问题'], ['第 2 周', '理解 Agent 基础', '理解 Agent、模型、工具与任务之间的关系'], ['第 3 周', '完成最小练习', '用一个简单场景练习提示词与工具调用'], ['第 4 周', '分析边界', '明确目标、指标、基准与可回答问题'],
@@ -40,6 +41,10 @@ function App() {
   const [authMessage, setAuthMessage] = useState('')
   const [authBusy, setAuthBusy] = useState(false)
   const [dbMessage, setDbMessage] = useState('')
+  const [researchBusy, setResearchBusy] = useState(false)
+  const [planBusy, setPlanBusy] = useState(false)
+  const [planError, setPlanError] = useState('')
+  const [planDraft, setPlanDraft] = useState<PlanDraftTask[]>([])
   const [learningNote, setLearningNote] = useState('')
   const [planVersion, setPlanVersion] = useState<number | null>(null)
   const [planUpdatedAt, setPlanUpdatedAt] = useState<string | null>(null)
@@ -117,9 +122,89 @@ function App() {
     return () => document.removeEventListener('input', handlePriorityChange)
   }, [])
   const signOut = async () => { if (supabase) await supabase.auth.signOut(); resetWorkspace(); setAuthMessage('已退出管理员账号，页面已回到访客初始状态。') }
+  const runResearch = async () => {
+    if (researchBusy) return false
+    if (!supabase) { setDbMessage('Supabase 尚未配置，无法开始联网研究。'); return false }
+    setResearchBusy(true)
+    setResearchState('研究中')
+    setDbMessage('正在联网搜索资料，请稍候…')
+    const { data, error } = await supabase.functions.invoke('research-study-materials', {
+      body: { goal, currentLevel: '有一些相关经验', weeklyMinutes, languagePreference: '中文为主，保留英文原文', priorityQuestions },
+    })
+    if (error) {
+      let detail = error.message
+      const context = (error as { context?: Response }).context
+      if (context) {
+        try { const body = await context.clone().json(); if (body?.error) detail = body.error } catch { /* keep message */ }
+      }
+      setResearchState('失败')
+      setDbMessage(`资料研究失败：${detail}`)
+      setResearchBusy(false)
+      return false
+    }
+    if (!data?.ok) {
+      setResearchState('失败')
+      setDbMessage(`资料研究失败：${data?.error ?? '服务返回了无效结果'}`)
+      setResearchBusy(false)
+      return false
+    }
+    const sources = Array.isArray(data.sources) ? data.sources : []
+    const resultText = typeof data.result === 'string' ? data.result : ''
+    const liveResources: Resource[] = sources.slice(0, 5).map((source: { title?: string; url?: string }, index: number) => ({
+      title: source.title || `研究资料 ${index + 1}`,
+      source: source.url || '联网研究结果',
+      topic: priorityQuestions || '学习资料',
+      summary: resultText || '已通过联网研究找到这条资料。',
+      reason: '由联网研究根据当前学习目标筛选。',
+      minutes: 45 + index * 15,
+      status: '待审核',
+    }))
+    setResources(liveResources.length ? liveResources : [{
+      title: '联网研究结果', source: 'Tu-zi Research', topic: priorityQuestions || '学习资料',
+      summary: resultText || '研究已完成，但没有返回可单独列出的来源。', reason: '根据当前学习目标生成。', minutes: 60, status: '待审核',
+    }])
+    setResearchState('完成')
+    setDbMessage(session ? '研究完成，资料尚未确认。' : '访客预览：研究完成，本次内容不会保存，刷新页面后会消失。')
+    setResearchBusy(false)
+    return true
+  }
+  const generatePlanDraft = async () => {
+    if (!supabase || planBusy) return
+    setPlanBusy(true)
+    setPlanError('')
+    setDbMessage('AI 正在根据你的目标、时间和资料安排 10 周计划…')
+    const { data, error } = await supabase.functions.invoke('research-study-materials', {
+      body: {
+        action: 'generate_plan',
+        goal,
+        currentLevel: '有一些相关经验',
+        weeklyMinutes,
+        priorityQuestions,
+        resources: resources.map(resource => ({
+          title: resource.title,
+          url: /^https?:\/\//i.test(resource.source) ? resource.source : '',
+        })),
+      },
+    })
+    if (error || !data?.ok || !Array.isArray(data.tasks) || data.tasks.length !== 10) {
+      let detail = data?.error || error?.message || '服务没有返回完整的 10 周计划'
+      const context = (error as { context?: Response } | null)?.context
+      if (context) {
+        try { const body = await context.clone().json(); if (body?.error) detail = body.error } catch { /* use the invocation error */ }
+      }
+      setPlanError(`计划生成失败：${detail}`)
+      setDbMessage('计划没有生成；原有计划不会被更改。')
+      setPlanBusy(false)
+      return
+    }
+    setPlanDraft(data.tasks)
+    setPlanBusy(false)
+    setDbMessage('AI 已生成 10 周计划草稿，请检查后再确认。')
+    go(3, 'plan')
+  }
   const saveResearchBrief = async () => {
-    setDbMessage('正在保存…')
-    if (!supabase || !session) { setSubmitted(true); setDbMessage('访客预览：本次内容未保存，刷新页面后会消失。'); go(2, 'research'); return }
+    if (!(await runResearch())) return
+    if (!supabase || !session) { setSubmitted(true); go(2, 'research'); return }
     const { data: previous, error: readError } = await supabase.from('research_briefs').select('id').order('created_at', { ascending: false }).limit(1).maybeSingle()
     if (readError) { setDbMessage(`读取原记录失败：${readError.message}`); return }
     const values = { goal, current_level: '有一些相关经验', weekly_minutes: weeklyMinutes, language_preference: '中文为主，保留英文原文', priority_questions: priorityQuestions, updated_at: new Date().toISOString() }
@@ -162,21 +247,18 @@ function App() {
     changed.forEach(resource => { void updateResourceStatus(resource, resource.status) })
   }, [resources, session])
   const activatePlan = async () => {
-    if (!supabase || !session) { go(4, 'today'); setDbMessage('访客预览：计划没有保存，刷新页面后会消失。'); return }
+    if (!supabase || !session) return
     setDbMessage('正在保存新计划…')
     const { error: archiveError } = await supabase.from('study_plans').update({ status: 'archived', updated_at: new Date().toISOString() }).eq('status', 'active')
     if (archiveError) { setDbMessage(`旧计划归档失败：${archiveError.message}`); return }
     const { data: latest } = await supabase.from('study_plans').select('version').order('version', { ascending: false }).limit(1).maybeSingle()
     const nextVersion = (latest?.version ?? 0) + 1
     const confirmedAt = new Date().toISOString()
-    const confirmedResources = resources.filter(resource => resource.status === '已确认')
     const planName = goal.trim() ? `围绕“${goal.trim().slice(0, 24)}”的学习计划` : '我的学习计划'
     const { data: newPlan, error } = await supabase.from('study_plans').insert({ name: planName, status: 'active', version: nextVersion, weekly_budget_minutes: weeklyMinutes, confirmed_at: confirmedAt }).select('id,version,updated_at').single()
     if (error) { setDbMessage(`新计划保存失败：${error.message}`); return }
-    const taskRows = stages.map((stage, index) => {
-      const resource = confirmedResources[index % Math.max(confirmedResources.length, 1)]
-      const resourceLabel = resource ? ` · 对应资料：${resource.title}` : ''
-      return { study_plan_id: newPlan.id, week_number: index + 1, title: `${stage[1]}${resourceLabel}`, purpose: `${stage[2]}${goal.trim() ? ` 当前目标：${goal.trim()}` : ''}`, resource_id: null, estimated_minutes: Math.round(weeklyMinutes / 2), completion_criteria: `完成第 ${index + 1} 周学习目标`, position: 1 }
+    const taskRows = planDraft.map((task, index) => {
+      return { study_plan_id: newPlan.id, week_number: task.weekNumber, title: task.title, purpose: `${task.purpose}${task.resourceTitle ? ` 参考资料：${task.resourceTitle}` : ''}`, resource_id: null, estimated_minutes: task.estimatedMinutes, completion_criteria: task.completionCriteria, position: index + 1 }
     })
     const { data: savedTasks, error: taskError } = await supabase.from('study_tasks').insert(taskRows).select('id,title,week_number,estimated_minutes')
     if (taskError) { setDbMessage(`计划任务保存失败：${taskError.message}`); return }
@@ -197,8 +279,8 @@ function App() {
     {step >= 4 && <section className={archiveOpen ? 'archive open' : 'archive'}><div className="archive-controls"><button type="button" className="archive-toggle" onClick={() => setArchiveOpen(value => !value)}><span><strong>查看学习计划</strong></span><span className="archive-chevron">⌄</span></button><button type="button" className="archive-edit" onClick={() => go(1, 'setup')}>修改计划</button></div>{archiveOpen && <div className="archive-body"><div className="archive-steps"><span className="status">当前已确认计划{planVersion ? ` · 第 ${planVersion} 版` : ''}</span><span className="status">每周预算：270 分钟</span></div><p>这里仅查看当前计划记录，不会改变今天的学习。需要修改时，请点击旁边的“修改计划”，从起点重新填写。</p>{planUpdatedAt && <p className="plan-updated">最近更新：{new Date(planUpdatedAt).toLocaleString('zh-CN')}</p>}<div className="archive-plan-list">{planTasks.length ? planTasks.map(task => <div className="archive-plan-row" key={`${task.week_number}-${task.title}`}><strong>第 {task.week_number} 周 · {task.title}</strong><span>预计 {task.estimated_minutes ?? 0} 分钟</span></div>) : stages.map(stage => <div className="archive-plan-row" key={stage[0]}><strong>{stage[0]} · {stage[1]}</strong><span>{stage[2]} · 预计 2–3 小时</span></div>)}</div></div>}</section>}
     {step < 4 && <nav className="tabs" aria-label="工作台页面">{tabs.slice(0, 3).map(([key, label]) => <button key={key} type="button" className={tab === key ? 'active' : ''} onClick={() => { if (key === 'setup' || (key === 'research' && submitted) || (key === 'plan' && step >= 3)) setTab(key) }}>{label}</button>)}</nav>}
     {tab === 'setup' && <section className="panel setup-panel"><div className="panel-number">STEP 01 / 输入学习条件</div><h2>先告诉我，你想从哪里开始</h2><p>这些信息会帮助我筛选资料，并把学习计划安排在你的真实时间里。</p><div className="form-grid"><label className="full">你的学习目标<textarea value={goal} onChange={event => setGoal(event.target.value)} placeholder="例如：我想理解 Analytics Agent 的工作方式，并做出一个安全可控的最小原型。" /></label><label>现有基础<select defaultValue="有一些相关经验"><option>刚开始了解</option><option>有一些相关经验</option><option>已经做过项目</option></select></label><label>每周可投入时间<select defaultValue="每周约 270 分钟"><option>每周约 120 分钟</option><option>每周约 270 分钟</option><option>每周约 420 分钟</option></select></label><label>资料偏好<select defaultValue="中文为主，保留英文原文"><option>中文为主，保留英文原文</option><option>英文原文优先</option><option>短文与视频优先</option></select></label><label>希望优先解决的问题<input placeholder="例如：工具调用、指标口径、安全边界" /></label></div><div className="form-actions"><span>{dbMessage || '提交后先进入资料收集，不会直接生成计划。'}</span><button className="primary-button" disabled={!goal.trim()} onClick={() => void saveResearchBrief()}>保存条件，开始收集资料 <span>→</span></button></div></section>}
-    {tab === 'research' && <section className="panel list-panel"><div className="panel-number">STEP 02 / 资料收集</div><h2>围绕你的目标，找到值得学习的资料</h2><p>这是一次模拟研究结果。打开条目查看主旨、理由和来源，再决定是否纳入计划。</p><div className="research-banner"><span className="spinner">✦</span><div><strong>{researchState === '研究中' ? '正在整理 3 个主题…' : researchState === '失败' ? '研究暂时失败' : '已根据你的学习条件整理 3 个主题'}</strong><small>Agent 基础 · 工具调用 · 分析边界</small></div><span className="status">{researchState}</span></div>{researchState === '失败' && <div className="error-box">模拟网络错误：之前的有效结果仍保留。<button className="text-button" onClick={() => setResearchState('研究中')}>重试研究</button></div>}<div className="stage-list">{resources.map(resource => <div className="stage-row resource-row" key={resource.title} onClick={() => setSelectedResource(selectedResource === resource.title ? null : resource.title)}><span className="resource-icon">↗</span><div><strong>{resource.title}</strong><small>{resource.source} · {resource.topic} · {resource.minutes} 分钟</small>{selectedResource === resource.title && <div className="resource-detail"><p>{resource.summary}</p><small>推荐理由：{resource.reason}</small><div className="resource-actions"><button onClick={event => { event.stopPropagation(); setResources(items => items.map(item => item.title === resource.title ? { ...item, status: '已确认' } : item)) }}>确认</button><button onClick={event => { event.stopPropagation(); setResources(items => items.map(item => item.title === resource.title ? { ...item, status: '暂缓' } : item)) }}>暂缓</button><button onClick={event => { event.stopPropagation(); setResources(items => items.map(item => item.title === resource.title ? { ...item, status: '已放弃' } : item)) }}>放弃</button></div></div>}</div><span className="status">{resource.status}</span></div>)}</div><div className="form-actions"><span>已确认 {resources.filter(resource => resource.status === '已确认').length} 条资料 · 只有确认项会进入计划。</span><button className="primary-button" onClick={() => go(3, 'plan')}>用这些资料制作计划 <span>→</span></button></div></section>}
-    {tab === 'plan' && <section className="panel plan-panel"><div className="panel-number">STEP 03 / 修改并确认学习计划</div><h2>先修改，再生成新的计划版本</h2><p>当前计划不会立即改变。确认后，新计划才会成为之后的“今日学习”。旧计划会保留为历史版本。</p><div className="plan-summary"><div><small>学习目标</small><strong>{goal || '理解 Analytics Agent 并完成一个最小实践'}</strong></div><div><small>时间预算</small><strong>每周 {(weeklyMinutes / 60).toFixed(1)} 小时</strong></div><div><small>已纳入资料</small><strong>{resources.filter(resource => resource.status === '已确认').length || 3} 条</strong></div></div><div className="budget-note">这是新的计划草稿。第 5 周预计 {Math.round(weeklyMinutes * 1.1)} 分钟，当前每周预算为 {weeklyMinutes} 分钟。</div><div className="stage-list">{stages.map(stage => <div className="stage-row" key={stage[0]}><span className="week">{stage[0]}</span><div><strong>{stage[1]}</strong><small>{stage[2]}</small></div><span className="status">新草稿</span></div>)}</div><div className="form-actions"><button className="text-button" onClick={() => go(4, 'today')}>← 返回今日学习</button><button className="primary-button" onClick={() => void activatePlan()}>确认新计划并开始学习 <span>→</span></button></div></section>}
+    {tab === 'research' && <section className="panel list-panel"><div className="panel-number">STEP 02 / 资料收集</div><h2>围绕你的目标，找到值得学习的资料</h2><p>这些资料由 AI 根据你的目标联网搜索整理。打开条目查看内容，再决定是否纳入计划。</p><div className="research-banner"><span className="spinner">✦</span><div><strong>{researchState === '研究中' ? '正在联网搜索资料…' : researchState === '失败' ? '研究暂时失败' : '已完成联网资料搜索'}</strong><small>请核对来源和内容，再选择是否纳入计划</small></div><span className="status">{researchState}</span></div>{researchState === '失败' && <div className="error-box">{dbMessage}<button className="text-button" onClick={() => void saveResearchBrief()}>重试搜索</button></div>}{planError && <div className="error-box">{planError} 点击下方按钮可以重试生成。</div>}<div className="stage-list">{resources.map(resource => <div className="stage-row resource-row" key={resource.title} onClick={() => setSelectedResource(selectedResource === resource.title ? null : resource.title)}><span className="resource-icon">↗</span><div><strong>{resource.title}</strong><small>{resource.source} · {resource.topic} · {resource.minutes} 分钟</small>{selectedResource === resource.title && <div className="resource-detail"><p>{resource.summary}</p><small>推荐理由：{resource.reason}</small><div className="resource-actions"><button onClick={event => { event.stopPropagation(); setResources(items => items.map(item => item.title === resource.title ? { ...item, status: '已确认' } : item)) }}>确认</button><button onClick={event => { event.stopPropagation(); setResources(items => items.map(item => item.title === resource.title ? { ...item, status: '暂缓' } : item)) }}>暂缓</button><button onClick={event => { event.stopPropagation(); setResources(items => items.map(item => item.title === resource.title ? { ...item, status: '已放弃' } : item)) }}>放弃</button></div></div>}</div><span className="status">{resource.status}</span></div>)}</div><div className="form-actions"><span>已确认 {resources.filter(resource => resource.status === '已确认').length} 条；未确认的资料也会作为计划草稿参考。</span><button className="primary-button" disabled={planBusy} onClick={() => void generatePlanDraft()}>{planBusy ? 'AI 正在安排 10 周计划…' : '用 AI 整理学习计划'} <span>→</span></button></div></section>}
+    {tab === 'plan' && <section className="panel plan-panel"><div className="panel-number">STEP 03 / AI 学习计划草稿</div><h2>检查 AI 为你安排的 10 周计划</h2><p>计划根据学习目标、每周时间和搜索资料生成。请先逐周检查；只有管理员确认后才会保存并生效。</p><div className="plan-summary"><div><small>学习目标</small><strong>{goal || '未填写'}</strong></div><div><small>时间预算</small><strong>每周 {weeklyMinutes} 分钟</strong></div><div><small>参考资料</small><strong>{resources.length} 条</strong></div></div>{planError && <div className="error-box">{planError}<button className="text-button" onClick={() => void generatePlanDraft()}>重新生成</button></div>}<div className="stage-list">{planDraft.map(task => <div className="stage-row" key={task.weekNumber}><span className="week">第 {task.weekNumber} 周</span><div><strong>{task.title}</strong><small>{task.purpose}{task.resourceTitle ? ` · 参考：${task.resourceTitle}` : ''} · 预计 ${task.estimatedMinutes} 分钟 · 完成标准：${task.completionCriteria}</small></div><span className="status">AI 草稿</span></div>)}</div><div className="form-actions"><button className="text-button" onClick={() => go(2, 'research')}>← 返回资料审核</button><button className="primary-button" disabled={!session || planBusy || planDraft.length !== 10} title={session ? '确认后会保存为新的计划版本' : '请先登录管理员账号，才能确认并保存计划'} onClick={() => void activatePlan()}>确认计划并开始学习 <span>→</span></button></div>{!session && <p className="auth-warning">访客可以生成和检查草稿，但不能确认或保存；请先登录管理员账号。</p>}</section>}
     {tab === 'today' && <section className="grid"><article className="panel primary"><div className="panel-number">本周学习计划 / WEEK 01{planVersion ? ` · 第 ${planVersion} 版` : ''}</div><h2>{planTasks.length ? '当前学习计划' : 'Agent 基础'}</h2><div className="today-date">2026 年 10 月 2 日 · 星期五</div><p>本周目标：{goal || '建立对 Agent 的整体理解'} · 每周预算 {weeklyMinutes} 分钟。</p><div className="week-tasks">{(planTasks.length ? planTasks.slice(0, 3) : dailyTasks.slice(0, 3).map((task, index) => ({ title: task[0], week_number: index + 1 }))).map((task, index) => <div key={task.title}><span>{completedDays.includes(index + 1) ? '✓' : '○'}</span>{task.title}</div>)}</div><div className="progress"><span className={completedDays.length ? 'progress-complete' : ''} /></div><div className="meta"><span>本周进度</span><strong>{completedDays.length} / {Math.min(planTasks.length || 3, 3)} 项</strong></div></article><article className="panel"><div className="panel-number">WEEK 01 / DAY 0{day}</div><h2>今天学什么</h2>{scheduleNote && <div className="schedule-note">{scheduleNote}</div>}{!todayStarted && <div className="review-card"><strong>{day === 1 ? '今天是学习的第一天，享受当下吧。' : `今天是学习的第 ${day} 天，继续保持自己的节奏。`}</strong><p>完成今天的学习后，再回来记录你的理解、疑问和练习结果。</p></div>} {todayStarted && <div className="review-card"><span className="review-label">学习回顾</span><strong>{day === 1 ? '这是你的第一天，目前还没有过去的学习记录。' : '回顾昨天的学习记录，再开始今天的内容。'}</strong><p>今天先专注于当前任务，完成后再记录新的发现。</p></div>}<div className="today-task"><span>0{day}</span><div><strong>{currentTask[0]}</strong><small>{currentTask[1]}</small></div></div><div className="schedule-actions"><button onClick={() => { if (resting) advanceDay(); else if (!todayCompleted) setScheduleNote('先完成今天的份额哦'); else if (!recordSaved) setScheduleNote('先保存今天的学习记录哦'); else advanceDay() }}>提前学习</button></div>{!todayStarted && !resting && <button className="primary-button full-button" onClick={() => setTodayStarted(true)}>开始今日学习 <span>→</span></button>}{todayStarted && !todayCompleted && <button className="primary-button full-button" onClick={() => setTodayCompleted(true)}>完成今日计划，填写学习记录 <span>→</span></button>}{todayCompleted && !recordSaved && <div className="record-after-task"><div className="panel-number">完成今日计划 / 保存学习记录</div><textarea className="record-input" value={learningNote} onChange={event => setLearningNote(event.target.value)} placeholder="记录今天学会了什么、还不清楚什么，以及练习结果" /><button className="primary-button full-button" onClick={() => void saveLearningSession()}>保存今日学习记录 <span>→</span></button></div>}{recordSaved && !resting && <div className="next-day"><div className="saved-note">已保存本次学习记录。</div><strong>是否进入下一天？</strong><div><button onClick={advanceDay}>是，继续学习</button><button onClick={() => setResting(true)}>否，先休息</button></div></div>}{resting && <div className="saved-note">学习完成，可以休息啦。想提前开始下一天吗？</div>}</article></section>}
     <footer>依据 Project Brief · 本地模拟版本 · 数据不会保存</footer>
   </main>

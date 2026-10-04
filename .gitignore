@@ -16,11 +16,12 @@ dist/
 # Local environment and secrets
 .env
 .env.local
+.env.example
 .env.*.local
 
 # Supabase local state
 supabase/.env
-supabase/.env.local
+supabase/.env.*
 supabase/.branches/
 supabase/.temp/
 
@@ -34,9 +35,6 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
-
-# Local Supabase CLI credentials and generated state
-supabase/.env.*
 
 # OS/editor metadata
 .history/
