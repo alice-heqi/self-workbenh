@@ -201,9 +201,11 @@ Deno.serve(async (request) => {
           throw new Error(`第 ${index + 1} 周内容不完整或超出时间预算`)
         }
         const requestedTitle = typeof task.resourceTitle === 'string' ? task.resourceTitle.trim() : ''
-        const matchedResource = (body.resources ?? []).find(resource =>
-          resource.title.trim().toLocaleLowerCase() === requestedTitle.toLocaleLowerCase(),
-        )
+        const availableResources = body.resources ?? []
+        const matchedResource = availableResources.find((resource) => {
+          const availableTitle = resource.title.trim().toLowerCase()
+          return availableTitle === requestedTitle.toLowerCase()
+        })
         if (requestedTitle && !matchedResource) {
           throw new Error(`第 ${index + 1} 周引用了未提供的资料`)
         }
